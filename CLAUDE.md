@@ -87,3 +87,39 @@ All policy application — tagging, ACL, startup reconciliation, move handling �
 | Immutable (default) | Tag present, writes denied | ACL deny write |
 | Write window open | Tag absent, writes allowed | ACL allow write |
 | Exempt folder | No tag applied | ACL allow write |
+
+## Implementation Progress
+
+### Done
+- **Config module** (`src/config.rs`) — TOML loading, `UserCredentials`, `is_exempt()` predicate
+- **API client** (`src/api.rs`) — Full Nextcloud WebDAV/tag API:
+  - `create_tag`, `apply_tag` (idempotent, tolerates 409), `delete_tag` (idempotent, tolerates 404)
+  - `get_tagged_files` (REPORT query), `get_file_id` (PROPFIND)
+  - `ensure_tag` (find-or-create), `find_tag_by_name` (PROPFIND with display-name)
+  - Serde structs for WebDAV XML deserialization
+- **Startup reconciler** (`src/reconciler.rs`) — Walks local sync dir, compares against server tags, applies/removes tags to match policy. Tested against real Nextcloud.
+- **Filesystem watcher** (`src/watcher.rs`) — `notify`-based recursive watcher, sends events via `tokio::sync::mpsc` channel
+- **Main entrypoint** (`src/main.rs`) — Loads config, ensures tag, runs reconciler, starts watcher event loop
+
+### Next Steps
+- **Policy engine** (`src/policy.rs`) — Handle watcher events (`Create(File)`, `Modify(Name)`) with tag/untag logic
+- **`FilePolicyBackend` trait** — Abstract platform-specific ACL operations (Windows `SetFileAttributesW`)
+- **Local state store** (`sled`) — Persistent `path → (fileId, tag_state)` mapping to avoid redundant API calls
+- **Error handling** — Replace `Box<dyn Error>` with a proper error enum
+- **Logging** — Add structured logging (`tracing` crate)
+
+## Testing with Docker
+
+Spin up a local Nextcloud instance for testing:
+
+```sh
+sudo docker run -d -p 8080:80 -e NEXTCLOUD_ADMIN_USER=admin -e NEXTCLOUD_ADMIN_PASSWORD=test123 --name nextcloud nextcloud
+```
+
+Complete the install by visiting `http://localhost:8080` (SQLite is fine for testing). Once installed, the daemon can be tested with `cargo run` using `config/test_config.toml`.
+
+```sh
+sudo docker stop nextcloud   # pause
+sudo docker start nextcloud  # resume
+sudo docker rm -f nextcloud  # destroy (deletes all data)
+```
