@@ -4,7 +4,9 @@ use crate::{api::NextcloudClient, config::NextcloudConfig};
 
 mod api;
 mod config;
+mod policy;
 mod reconciler;
+mod store;
 mod watcher;
 
 #[tokio::main]
@@ -28,7 +30,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _watcher = watcher::start_watching(&config.local_sync_path, sender)?;
 
     while let Some(event) = receiver.recv().await {
-        println!("{event:?}");
+        if let Err(e) = policy::handle_event(
+            &event,
+            &client,
+            &tag_id,
+            &config.local_sync_path,
+            &config.exempt_folder_names,
+        )
+        .await
+        {
+            eprintln!("error handling event: {e}");
+        }
     }
 
     Ok(())
