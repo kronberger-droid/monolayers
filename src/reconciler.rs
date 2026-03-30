@@ -1,12 +1,19 @@
 use std::{collections::HashSet, path::Path};
 
-use crate::{api::NextcloudClient, config::is_exempt};
+use crate::{
+    api::NextcloudClient,
+    backend::FilePolicyBackend,
+    config::is_exempt,
+    store::StateStore,
+};
 
 pub async fn reconcile(
     client: &NextcloudClient,
     tag_id: &str,
     sync_path: &Path,
     exempt_names: &[String],
+    store: &StateStore,
+    backend: &dyn FilePolicyBackend,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tagged_files: HashSet<String> =
         client.get_tagged_files(tag_id).await?.into_iter().collect();
@@ -32,12 +39,23 @@ pub async fn reconcile(
             (true, true) => {
                 let file_id = client.get_file_id(relative_path).await?;
                 client.delete_tag(&file_id, tag_id).await?;
+                store.set(relative_path, &file_id, false)?;
+                backend.set_readonly(local_path, false)?;
             }
             (false, false) => {
                 let file_id = client.get_file_id(relative_path).await?;
                 client.apply_tag(&file_id, tag_id).await?;
+                store.set(relative_path, &file_id, true)?;
+                backend.set_readonly(local_path, true)?;
             }
-            _ => {}
+            (false, true) => {
+                let file_id = client.get_file_id(relative_path).await?;
+                store.set(relative_path, &file_id, true)?;
+                backend.set_readonly(local_path, true)?;
+            }
+            (true, false) => {
+                backend.set_readonly(local_path, false)?;
+            }
         }
     }
 

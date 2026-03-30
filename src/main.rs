@@ -1,8 +1,14 @@
 use std::path::Path;
 
-use crate::{api::NextcloudClient, config::NextcloudConfig};
+use crate::{
+    api::NextcloudClient,
+    backend::LinuxBackend,
+    config::NextcloudConfig,
+    store::StateStore,
+};
 
 mod api;
+mod backend;
 mod config;
 mod policy;
 mod reconciler;
@@ -17,11 +23,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tag_id = client.ensure_tag("immutable").await?;
 
+    let store = StateStore::open(Path::new("data/state.db"))?;
+    let backend = LinuxBackend;
+
     reconciler::reconcile(
         &client,
         &tag_id,
         &config.local_sync_path,
         &config.exempt_folder_names,
+        &store,
+        &backend,
     )
     .await?;
 
@@ -36,6 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &tag_id,
             &config.local_sync_path,
             &config.exempt_folder_names,
+            &store,
+            &backend,
         )
         .await
         {
