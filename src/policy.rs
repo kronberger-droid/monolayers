@@ -80,6 +80,44 @@ pub async fn handle_event(
                 (true, true) => {}
             }
         }
+        // RenameMode::To — treat as a new file appearing (same as Create)
+        notify::EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::To,
+        )) => {
+            let local_path = &event.paths[0];
+            let relative_path = local_path
+                .strip_prefix(sync_path)?
+                .to_str()
+                .ok_or("non-utf8 path")?;
+
+            if is_exempt(local_path, exempt_names) {
+                let file_id =
+                    resolve_file_id(store, client, relative_path).await?;
+                client.delete_tag(&file_id, tag_id).await?;
+                store.set(relative_path, &file_id, false)?;
+                backend.set_readonly(local_path, false)?;
+            } else {
+                let file_id =
+                    resolve_file_id(store, client, relative_path).await?;
+                client.apply_tag(&file_id, tag_id).await?;
+                store.set(relative_path, &file_id, true)?;
+                backend.set_readonly(local_path, true)?;
+            }
+        }
+        // RenameMode::From or Remove — file gone, clean up store
+        notify::EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::From,
+        ))
+        | notify::EventKind::Remove(_) => {
+            let local_path = &event.paths[0];
+            if let Some(relative_path) = local_path
+                .strip_prefix(sync_path)
+                .ok()
+                .and_then(|p| p.to_str())
+            {
+                store.remove(relative_path)?;
+            }
+        }
         _ => {}
     }
     Ok(())
