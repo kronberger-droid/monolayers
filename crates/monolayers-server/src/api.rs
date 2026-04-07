@@ -1,23 +1,25 @@
+// Legacy Nextcloud WebDAV API client — kept for reference.
+// The server no longer uses Nextcloud for enforcement (chattr +i replaces tags).
+// This module will be removed once the migration is complete.
+
 use reqwest::{Client, Method, StatusCode};
 use serde::Deserialize;
 use url::Url;
 
-use crate::config::UserCredentials;
-
 pub struct NextcloudClient {
     base_url: Url,
-    credentials: UserCredentials,
+    username: String,
+    password: String,
     client: Client,
 }
 
 impl NextcloudClient {
-    pub fn new(base_url: Url, credentials: UserCredentials) -> Self {
-        let client = Client::new();
-
+    pub fn new(base_url: Url, username: String, password: String) -> Self {
         Self {
             base_url,
-            credentials,
-            client,
+            username,
+            password,
+            client: Client::new(),
         }
     }
 
@@ -36,10 +38,7 @@ impl NextcloudClient {
         let response = self
             .client
             .post(endpoint_url)
-            .basic_auth(
-                self.credentials.username(),
-                Some(self.credentials.password()),
-            )
+            .basic_auth(&self.username, Some(&self.password))
             .json(&body)
             .send()
             .await?;
@@ -72,10 +71,7 @@ impl NextcloudClient {
         let response = self
             .client
             .put(endpoint_url)
-            .basic_auth(
-                self.credentials.username(),
-                Some(self.credentials.password()),
-            )
+            .basic_auth(&self.username, Some(&self.password))
             .send()
             .await?;
 
@@ -99,10 +95,7 @@ impl NextcloudClient {
         let response = self
             .client
             .delete(endpoint_url)
-            .basic_auth(
-                self.credentials.username(),
-                Some(self.credentials.password()),
-            )
+            .basic_auth(&self.username, Some(&self.password))
             .send()
             .await?;
 
@@ -121,7 +114,7 @@ impl NextcloudClient {
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let endpoint_url = self.base_url.join(&format!(
             "/remote.php/dav/files/{}/",
-            self.credentials.username()
+            self.username
         ))?;
 
         let xml_body = format!(
@@ -136,10 +129,7 @@ impl NextcloudClient {
         let response = self
             .client
             .request(Method::from_bytes(b"REPORT").unwrap(), endpoint_url)
-            .basic_auth(
-                self.credentials.username(),
-                Some(self.credentials.password()),
-            )
+            .basic_auth(&self.username, Some(&self.password))
             .header("Content-Type", "application/xml")
             .body(xml_body)
             .send()
@@ -148,8 +138,7 @@ impl NextcloudClient {
         let body = response.text().await?;
         let multi: MultiStatus = quick_xml::de::from_str(&body)?;
 
-        let prefix =
-            format!("/remote.php/dav/files/{}/", self.credentials.username());
+        let prefix = format!("/remote.php/dav/files/{}/", self.username);
 
         let paths = multi
             .responses
@@ -167,8 +156,7 @@ impl NextcloudClient {
     ) -> Result<String, Box<dyn std::error::Error>> {
         let endpoint_url = self.base_url.join(&format!(
             "/remote.php/dav/files/{}/{}",
-            self.credentials.username(),
-            path
+            self.username, path
         ))?;
 
         let xml_body = r#"<?xml version="1.0"?>
@@ -181,10 +169,7 @@ impl NextcloudClient {
         let response = self
             .client
             .request(Method::from_bytes(b"PROPFIND").unwrap(), endpoint_url)
-            .basic_auth(
-                self.credentials.username(),
-                Some(self.credentials.password()),
-            )
+            .basic_auth(&self.username, Some(&self.password))
             .header("Depth", "0")
             .header("Content-Type", "application/xml")
             .body(xml_body)
@@ -192,7 +177,6 @@ impl NextcloudClient {
             .await?;
 
         let body = response.text().await?;
-
         let file_response: FileIdResponse = quick_xml::de::from_str(&body)?;
 
         Ok(file_response.response.propstat.prop.fileid)
@@ -224,10 +208,7 @@ impl NextcloudClient {
         let response = self
             .client
             .request(Method::from_bytes(b"PROPFIND").unwrap(), endpoint_url)
-            .basic_auth(
-                self.credentials.username(),
-                Some(self.credentials.password()),
-            )
+            .basic_auth(&self.username, Some(&self.password))
             .header("Depth", "1")
             .header("Content-Type", "application/xml")
             .body(xml_body)

@@ -1,5 +1,5 @@
 {
-  description = "Rust CLI development shell";
+  description = "Monolayers — file immutability daemon";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -49,6 +49,30 @@
           mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
         '';
       in {
+        packages = let
+          common = {
+            version = "0.1.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = with pkgs; [pkg-config];
+          };
+        in {
+          monolayers-server = pkgs.rustPlatform.buildRustPackage (common // {
+            pname = "monolayers-server";
+            cargoBuildFlags = ["-p" "monolayers-server"];
+          });
+
+          monolayers-client = pkgs.rustPlatform.buildRustPackage (common // {
+            pname = "monolayers-client";
+            cargoBuildFlags = ["-p" "monolayers-client"];
+          });
+
+          default = pkgs.rustPlatform.buildRustPackage (common // {
+            pname = "monolayers-server";
+            cargoBuildFlags = ["-p" "monolayers-server"];
+          });
+        };
+
         devShells.default = pkgs.mkShell {
           name = "rust-cli-dev";
           buildInputs = rustDeps;

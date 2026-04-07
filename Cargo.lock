@@ -772,16 +772,39 @@ dependencies = [
 ]
 
 [[package]]
-name = "monolayers"
+name = "monolayers-client"
 version = "0.1.0"
 dependencies = [
+ "monolayers-core",
+ "serde",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "monolayers-core"
+version = "0.1.0"
+dependencies = [
+ "notify",
+ "serde",
+ "serde_json",
+ "sled",
+ "tempfile",
+ "tokio",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "monolayers-server"
+version = "0.1.0"
+dependencies = [
+ "monolayers-core",
  "notify",
  "quick-xml",
  "reqwest",
  "serde",
  "serde_json",
- "sled",
- "tempfile",
  "tokio",
  "toml",
  "url",

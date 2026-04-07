@@ -1,125 +1,123 @@
-# Monolayers — Nextcloud File Persistence Daemon
+# Monolayers — File Immutability Daemon
 
 ## What This Is
 
-A Windows daemon that enforces **immutability as the default state** for files in Nextcloud. Files are read-only by default (including for the owner) and can only be written during explicitly opened write windows controlled by an admin.
+A Cargo workspace producing two binaries that enforce **immutability as the default state** for lab files (WORM — Write Once, Read Many):
 
-The daemon does **not** handle sync — the Nextcloud desktop client does all file transfer. The daemon's sole job is keeping local filesystem permissions in sync with server-side tag state.
+- **`monolayers-server`** — runs on the NixOS server, watches `/srv/files`, applies `chattr +i` (kernel-level immutability), serves an HTTP sync API
+- **`monolayers-client`** — runs on workstations (Windows/Mac/Linux), syncs files from the server, sets OS-native read-only attributes
 
-## Core Mechanism
-
-**Restricted system tags** via `files_access_control` app — not file locks. A restricted tag (`immutable`, `userAssignable: false`) is applied to files; only the admin (daemon) can add/remove it. The File Access Control rule denies writes when the tag is present.
-
-### Tag API (WebDAV, admin credentials)
-
-- **Create tag:** `POST /remote.php/dav/systemtags` with `{"name": "immutable", "userVisible": true, "userAssignable": false}`
-- **Apply tag:** `PUT /remote.php/dav/systemtags-relations/files/{fileId}/{tagId}`
-- **Remove tag:** `DELETE /remote.php/dav/systemtags-relations/files/{fileId}/{tagId}`
-- **Query tagged files:** `REPORT /remote.php/dav/files/admin/` with `<oc:systemtag>{tagId}</oc:systemtag>` filter
+The infrastructure (NixOS config, Samba, backup, monitoring) lives in the `monolayers-infra` repo. Design context is in the Obsidian vault at `~/Documents/notes/general-vault/Lab File Storage/`.
 
 ## Architecture
 
 ```
-tokio runtime
-├── task: CfApi listener      →  open/close events     →  policy engine
-├── task: notify watcher      →  NC client write events →  policy engine
-├── task: policy engine       →  is_exempt(path)?
-│                                  no  → tag API + set ACL RO
-│                                  yes → ensure untagged + ACL RW
-└── task: startup reconciler  →  REPORT query → walk local files → apply policy
+monolayers-server (NixOS)
+├── inotify watcher          → policy engine → chattr +i
+├── startup reconciler       → walk files, ensure chattr state
+├── sled state store         → tracks which files are locked
+└── HTTP sync API (axum)
+    ├── GET  /api/manifest   → (path, sha256, size) for all files
+    ├── GET  /api/files/*    → download a file
+    └── POST /api/files/*    → upload (authenticated)
+
+monolayers-client (Windows/Mac/Linux)
+├── sync loop                → poll manifest, diff, download/upload
+├── inotify/FSEvents watcher → policy engine → OS read-only attrs
+└── sled state store         → tracks local file state
 ```
 
-Platform-specific code is isolated behind a `FilePolicyBackend` trait:
+Platform-specific code is isolated behind `FilePolicyBackend`:
 
 ```rust
 trait FilePolicyBackend {
-    async fn on_open(&self, path: &Path);
-    async fn on_close(&self, path: &Path);
     fn set_readonly(&self, path: &Path, readonly: bool) -> io::Result<()>;
 }
 ```
 
+Implementations:
+- **Server:** `ChattrBackend` — `chattr +i` / `chattr -i` (requires `CAP_LINUX_IMMUTABLE`)
+- **Client (Linux/Mac):** `ChmodBackend` — clears/sets write bits
+- **Client (Windows):** `WindowsBackend` — `SetFileAttributesW` with `FILE_ATTRIBUTE_READONLY` (not yet implemented)
+
+## Workspace Structure
+
+```
+Cargo.toml                          (workspace root)
+crates/
+├── monolayers-core/                (shared library)
+│   └── src/
+│       ├── backend.rs              FilePolicyBackend trait
+│       ├── config.rs               is_exempt() predicate
+│       ├── store.rs                StateStore (sled)
+│       └── watcher.rs              notify-based recursive watcher
+├── monolayers-server/              (server binary)
+│   └── src/
+│       ├── main.rs                 entry point
+│       ├── backend.rs              ChattrBackend
+│       ├── config.rs               ServerConfig (TOML)
+│       ├── policy.rs               event → chattr policy
+│       ├── reconciler.rs           startup walk + enforce
+│       └── api.rs                  legacy Nextcloud client (reference)
+└── monolayers-client/              (client binary — skeleton)
+    └── src/
+        └── main.rs
+src-legacy/                         old single-binary code (reference)
+```
+
+## Sync Protocol
+
+WORM makes sync append-only — no conflict resolution needed:
+- **Download:** `server_manifest - local_files`
+- **Upload:** `local_files - server_manifest`
+- **Collision (same path from two machines):** keep both, rename one
+
+The server daemon serves the sync API directly (axum). No external sync server (Seafile/Nextcloud) required.
+
+## Exempt Folders
+
+Folders matching a configurable name (e.g. `_working`) anywhere in the file tree are excluded from immutability. Files inside are never locked and always writable. The `is_exempt()` predicate is in `monolayers-core` — shared by both binaries.
+
 ## Key Dependencies
 
-| Crate | Purpose |
-|-------|---------|
-| `tokio` | Async runtime |
-| `reqwest` | WebDAV/OCS API calls |
-| `serde` | Serialization |
-| `quick-xml` | WebDAV XML parsing |
-| `notify` | Filesystem watching (`ReadDirectoryChangesW`) |
-| `windows` | CfApi + `SetFileAttributesW` |
-| `sled` | Persistent local state (`path → fileId → tag_state`) |
+| Crate | Used by | Purpose |
+|-------|---------|---------|
+| `tokio` | both | Async runtime |
+| `notify` | both | Filesystem watching |
+| `sled` | both | Persistent state store |
+| `serde` / `toml` | both | Config + serialization |
+| `axum` | server | HTTP sync API |
+| `reqwest` | server | Legacy Nextcloud API (to be removed) |
+| `walkdir` | server | Startup reconciliation |
 
 ## Design Decisions
 
-- **Windows only** — CfApi provides native file open/close callbacks when NC client runs in VFS mode.
-- **One NC user per machine** — no multi-client coordination needed; each daemon manages only its own user's files.
-- **Mobile clients get read-only share access** — no daemon needed on mobile.
-- **Write windows are admin-only** — initiated via Nextcloud web UI by removing the restricted tag. No desktop/mobile client can open one.
-- **Exempt folders** — folders matching a configurable name (e.g. `_working`) anywhere in the sync tree are excluded from the immutability policy. Files inside are never tagged and always writable.
-
-## Exempt Folder Path Predicate
-
-```rust
-fn is_exempt(path: &Path, exempt_names: &[&str]) -> bool {
-    path.ancestors().any(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| exempt_names.contains(&n))
-            .unwrap_or(false)
-    })
-}
-```
-
-All policy application — tagging, ACL, startup reconciliation, move handling — checks this first.
-
-## State Management
-
-- Daemon is the sole writer of server tags → its own source of truth.
-- Local state in `sled`: `local_path → (fileId, tag_state)`.
-- On restart: reconcile local state against server REPORT query.
-
-## Permission Mapping
-
-| State | Server | Local (Windows) |
-|-------|--------|-----------------|
-| Immutable (default) | Tag present, writes denied | ACL deny write |
-| Write window open | Tag absent, writes allowed | ACL allow write |
-| Exempt folder | No tag applied | ACL allow write |
+- **`chattr +i` over application-level enforcement** — kernel-enforced, not bypassable without `CAP_LINUX_IMMUTABLE`
+- **Non-root daemon** with only `CAP_LINUX_IMMUTABLE` — minimal blast radius
+- **Built-in sync** — daemon is the sync server, no Seafile/Nextcloud dependency
+- **Two access modes** — SMB for online/LAN, client sync for offline
+- **Single .exe client** — cross-compiled via Nix, no installer needed
+- **Exempt folders** — `_working` dirs skip immutability, checked by all policy paths
+- **Admin = SSH access** — no separate admin UI; write windows via `_working` folders or direct `chattr -i`
 
 ## Implementation Progress
 
 ### Done
-- **Config module** (`src/config.rs`) — TOML loading, `UserCredentials`, `is_exempt()` predicate
-- **API client** (`src/api.rs`) — Full Nextcloud WebDAV/tag API:
-  - `create_tag`, `apply_tag` (idempotent, tolerates 409), `delete_tag` (idempotent, tolerates 404)
-  - `get_tagged_files` (REPORT query), `get_file_id` (PROPFIND)
-  - `ensure_tag` (find-or-create), `find_tag_by_name` (PROPFIND with display-name)
-  - Serde structs for WebDAV XML deserialization
-- **Startup reconciler** (`src/reconciler.rs`) — Walks local sync dir, compares against server tags, applies/removes tags to match policy. Tested against real Nextcloud.
-- **Filesystem watcher** (`src/watcher.rs`) — `notify`-based recursive watcher, sends events via `tokio::sync::mpsc` channel
-- **Main entrypoint** (`src/main.rs`) — Loads config, ensures tag, runs reconciler, starts watcher event loop
+- Workspace restructure (core + server + client)
+- `FilePolicyBackend` trait + `ChattrBackend` (server) + `ChmodBackend` (legacy, in core tests)
+- `is_exempt()` with tests
+- `StateStore` (sled) with tests
+- Filesystem watcher
+- Server policy engine (event → chattr)
+- Server reconciler (walk + enforce)
+- Server config (TOML)
 
 ### Next Steps
-- **Policy engine** (`src/policy.rs`) — Handle watcher events (`Create(File)`, `Modify(Name)`) with tag/untag logic
-- **`FilePolicyBackend` trait** — Abstract platform-specific ACL operations (Windows `SetFileAttributesW`)
-- **Local state store** (`sled`) — Persistent `path → (fileId, tag_state)` mapping to avoid redundant API calls
-- **Error handling** — Replace `Box<dyn Error>` with a proper error enum
-- **Logging** — Add structured logging (`tracing` crate)
-
-## Testing with Docker
-
-Spin up a local Nextcloud instance for testing:
-
-```sh
-sudo docker run -d -p 8080:80 -e NEXTCLOUD_ADMIN_USER=admin -e NEXTCLOUD_ADMIN_PASSWORD=test123 --name nextcloud nextcloud
-```
-
-Complete the install by visiting `http://localhost:8080` (SQLite is fine for testing). Once installed, the daemon can be tested with `cargo run` using `config/test_config.toml`.
-
-```sh
-sudo docker stop nextcloud   # pause
-sudo docker start nextcloud  # resume
-sudo docker rm -f nextcloud  # destroy (deletes all data)
-```
+- HTTP sync API (axum: manifest, download, upload)
+- Auth for sync API
+- Client sync loop
+- Windows backend (`SetFileAttributesW`)
+- Cross-compilation (`pkgsCross.mingwW64`)
+- GitHub Actions for Windows .exe releases
+- Error handling (replace `Box<dyn Error>` with proper enum)
+- Structured logging (`tracing`)
