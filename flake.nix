@@ -3,81 +3,51 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    flake-utils,
-    rust-overlay,
-    ...
-  }:
-    flake-utils.lib.eachDefaultSystem (
-      system: let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [rust-overlay.overlays.default];
-        };
+  outputs = {self, nixpkgs, fenix, ...}: let
+    forAllSystems = nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux"];
+  in {
+    packages = forAllSystems (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+      common = {
+        version = "0.1.0";
+        src = ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+        nativeBuildInputs = [pkgs.pkg-config];
+      };
+    in {
+      monolayers-server = pkgs.rustPlatform.buildRustPackage (common // {
+        pname = "monolayers-server";
+        cargoBuildFlags = ["-p" "monolayers-server"];
+      });
 
-        rustTools = {
-          stable = pkgs.rust-bin.stable.latest.default.override {
-            extensions = ["rust-src"];
-          };
-          analyzer = pkgs.rust-bin.stable.latest.rust-analyzer;
-        };
+      monolayers-client = pkgs.rustPlatform.buildRustPackage (common // {
+        pname = "monolayers-client";
+        cargoBuildFlags = ["-p" "monolayers-client"];
+      });
 
-        devTools = with pkgs; [
-          cargo-expand
-          cargo-dist
-          pkg-config
-          gcc
+      default = self.packages.${system}.monolayers-server;
+    });
+
+    devShells = forAllSystems (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+      toolchain = fenix.packages.${system}.stable.withComponents [
+        "cargo" "clippy" "rust-src" "rustc" "rustfmt"
+      ];
+    in {
+      default = pkgs.mkShell {
+        nativeBuildInputs = [
+          toolchain
+          fenix.packages.${system}.rust-analyzer
+          pkgs.pkg-config
+          pkgs.cargo-expand
         ];
-
-        rustDeps =
-          [
-            rustTools.stable
-            rustTools.analyzer
-          ]
-          ++ devTools;
-
-        shellHook = ''
-          echo "Using Rust toolchain: $(rustc --version)"
-          export CARGO_HOME="$HOME/.cargo"
-          export RUSTUP_HOME="$HOME/.rustup"
-          mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
-        '';
-      in {
-        packages = let
-          common = {
-            version = "0.1.0";
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-            nativeBuildInputs = with pkgs; [pkg-config];
-          };
-        in {
-          monolayers-server = pkgs.rustPlatform.buildRustPackage (common // {
-            pname = "monolayers-server";
-            cargoBuildFlags = ["-p" "monolayers-server"];
-          });
-
-          monolayers-client = pkgs.rustPlatform.buildRustPackage (common // {
-            pname = "monolayers-client";
-            cargoBuildFlags = ["-p" "monolayers-client"];
-          });
-
-          default = pkgs.rustPlatform.buildRustPackage (common // {
-            pname = "monolayers-server";
-            cargoBuildFlags = ["-p" "monolayers-server"];
-          });
-        };
-
-        devShells.default = pkgs.mkShell {
-          name = "rust-cli-dev";
-          buildInputs = rustDeps;
-          inherit shellHook;
-        };
-      }
-    );
+      };
+    });
+  };
 }
